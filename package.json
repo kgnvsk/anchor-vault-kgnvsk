@@ -1,0 +1,27 @@
+{
+  "name": "anchor-vault",
+  "version": "1.0.0",
+  "description": "Beginner Anchor vault program for Superteam Earn bounty",
+  "scripts": {
+    "build": "anchor build",
+    "test": "anchor test --provider.cluster devnet",
+    "test:local": "anchor test",
+    "deploy": "anchor deploy --provider.cluster devnet",
+    "lint": "eslint tests/ --ext .ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.30.1",
+    "@solana/web3.js": "^1.95.5"
+  },
+  "devDependencies": {
+    "@types/chai": "^4.3.12",
+    "@types/mocha": "^10.0.6",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "chai": "^4.4.1",
+    "eslint": "^8.56.0",
+    "mocha": "^10.3.0",
+    "ts-mocha": "^10.0.0",
+    "typescript": "^5.4.2"
+  }
+}
