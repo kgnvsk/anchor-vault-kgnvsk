@@ -25,6 +25,13 @@ pub mod anchor_vault {
         vault.owner = ctx.accounts.owner.key();
         vault.bump = ctx.bumps.vault;
         vault.total_deposited = 0;
+
+        emit!(VaultInitialized {
+            owner: vault.owner,
+            vault: ctx.accounts.vault.key(),
+            bump: vault.bump,
+        });
+
         msg!("Vault initialized. Owner: {}", vault.owner);
         Ok(())
     }
@@ -53,6 +60,13 @@ pub mod anchor_vault {
             .total_deposited
             .saturating_add(amount);
 
+        emit!(SolDeposited {
+            depositor: ctx.accounts.depositor.key(),
+            vault: ctx.accounts.vault.key(),
+            amount,
+            total_deposited: ctx.accounts.vault.total_deposited,
+        });
+
         msg!("Deposited {} lamports into vault", amount);
         Ok(())
     }
@@ -71,6 +85,13 @@ pub mod anchor_vault {
         **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.owner.try_borrow_mut_lamports()? += amount;
 
+        emit!(SolWithdrawn {
+            owner: ctx.accounts.owner.key(),
+            vault: ctx.accounts.vault.key(),
+            amount,
+            remaining_lamports: ctx.accounts.vault.to_account_info().lamports(),
+        });
+
         msg!("Withdrew {} lamports from vault", amount);
         Ok(())
     }
@@ -82,6 +103,15 @@ pub mod anchor_vault {
         token_vault.mint = ctx.accounts.mint.key();
         token_vault.bump = ctx.bumps.token_vault_state;
         token_vault.total_deposited = 0;
+
+        emit!(TokenVaultInitialized {
+            owner: token_vault.owner,
+            mint: token_vault.mint,
+            token_vault_state: ctx.accounts.token_vault_state.key(),
+            vault_token_account: ctx.accounts.vault_token_account.key(),
+            bump: token_vault.bump,
+        });
+
         msg!("Token vault initialized. Owner: {}, Mint: {}", token_vault.owner, token_vault.mint);
         Ok(())
     }
@@ -103,6 +133,15 @@ pub mod anchor_vault {
             .token_vault_state
             .total_deposited
             .saturating_add(amount);
+
+        emit!(TokenDeposited {
+            depositor: ctx.accounts.depositor.key(),
+            mint: ctx.accounts.mint.key(),
+            token_vault_state: ctx.accounts.token_vault_state.key(),
+            vault_token_account: ctx.accounts.vault_token_account.key(),
+            amount,
+            total_deposited: ctx.accounts.token_vault_state.total_deposited,
+        });
 
         msg!("Deposited {} tokens into token vault", amount);
         Ok(())
@@ -139,9 +178,72 @@ pub mod anchor_vault {
         );
         token::transfer(cpi_ctx, amount)?;
 
+        emit!(TokenWithdrawn {
+            owner: ctx.accounts.owner.key(),
+            mint: ctx.accounts.mint.key(),
+            token_vault_state: ctx.accounts.token_vault_state.key(),
+            vault_token_account: ctx.accounts.vault_token_account.key(),
+            amount,
+            remaining_balance: ctx.accounts.vault_token_account.amount.saturating_sub(amount),
+        });
+
         msg!("Withdrew {} tokens from token vault", amount);
         Ok(())
     }
+}
+
+// ─── Events ──────────────────────────────────────────────────────────────────
+
+#[event]
+pub struct VaultInitialized {
+    pub owner: Pubkey,
+    pub vault: Pubkey,
+    pub bump: u8,
+}
+
+#[event]
+pub struct SolDeposited {
+    pub depositor: Pubkey,
+    pub vault: Pubkey,
+    pub amount: u64,
+    pub total_deposited: u64,
+}
+
+#[event]
+pub struct SolWithdrawn {
+    pub owner: Pubkey,
+    pub vault: Pubkey,
+    pub amount: u64,
+    pub remaining_lamports: u64,
+}
+
+#[event]
+pub struct TokenVaultInitialized {
+    pub owner: Pubkey,
+    pub mint: Pubkey,
+    pub token_vault_state: Pubkey,
+    pub vault_token_account: Pubkey,
+    pub bump: u8,
+}
+
+#[event]
+pub struct TokenDeposited {
+    pub depositor: Pubkey,
+    pub mint: Pubkey,
+    pub token_vault_state: Pubkey,
+    pub vault_token_account: Pubkey,
+    pub amount: u64,
+    pub total_deposited: u64,
+}
+
+#[event]
+pub struct TokenWithdrawn {
+    pub owner: Pubkey,
+    pub mint: Pubkey,
+    pub token_vault_state: Pubkey,
+    pub vault_token_account: Pubkey,
+    pub amount: u64,
+    pub remaining_balance: u64,
 }
 
 // ─── Account Contexts ────────────────────────────────────────────────────────

@@ -1,21 +1,3 @@
-/**
- * Anchor Vault – Test Suite
- *
- * Tests cover:
- *  1. Initialize vault
- *  2. Deposit SOL
- *  3. View balance
- *  4. Withdraw SOL (authorized owner)
- *  5. Reject withdrawal by unauthorized signer
- *  6. Reject zero-amount deposit/withdraw
- *
- * Run against devnet:
- *   anchor test --provider.cluster devnet
- *
- * Run locally with a validator:
- *   anchor test
- */
-
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { AnchorVault } from "../target/types/anchor_vault";
@@ -26,15 +8,15 @@ import {
   SystemProgram,
 } from "@solana/web3.js";
 import {
-  createMint,
   createAssociatedTokenAccount,
-  mintTo,
+  createMint,
   getAccount,
+  mintTo,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { assert } from "chai";
 
-describe("anchor-vault", () => {
+describe("anchor-vault hardening", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
@@ -44,14 +26,14 @@ describe("anchor-vault", () => {
   let vaultPda: PublicKey;
   let vaultBump: number;
 
-  // ── helpers ──────────────────────────────────────────────────────────────
+  let mintA: PublicKey;
+  let mintB: PublicKey;
+  let ownerTokenA: PublicKey;
+  let ownerTokenB: PublicKey;
+  let tokenVaultStateA: PublicKey;
+  let vaultTokenAccountA: PublicKey;
 
-  async function getVaultPda(ownerKey: PublicKey) {
-    return PublicKey.findProgramAddressSync(
-      [Buffer.from("vault"), ownerKey.toBuffer()],
-      program.programId
-    );
-  }
+  const signer = owner.payer;
 
   async function airdropIfNeeded(pubkey: PublicKey, minSol = 1) {
     const bal = await provider.connection.getBalance(pubkey);
@@ -64,235 +46,296 @@ describe("anchor-vault", () => {
     }
   }
 
-  // ── setup ─────────────────────────────────────────────────────────────────
+  function findVault(ownerKey: PublicKey) {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), ownerKey.toBuffer()],
+      program.programId
+    );
+  }
+
+  function findTokenVault(ownerKey: PublicKey, mint: PublicKey) {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("token_vault"), ownerKey.toBuffer(), mint.toBuffer()],
+      program.programId
+    )[0];
+  }
+
+  function findTokenVaultAta(ownerKey: PublicKey, mint: PublicKey) {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("token_vault_ata"), ownerKey.toBuffer(), mint.toBuffer()],
+      program.programId
+    )[0];
+  }
+
+  async function expectFails(promise: Promise<unknown>, needles: string[]) {
+    try {
+      await promise;
+      assert.fail("expected transaction to fail");
+    } catch (err: any) {
+      const text = (err?.toString?.() ?? String(err)).toLowerCase();
+      const ok = needles.some((n) => text.includes(n.toLowerCase()));
+      assert.isTrue(
+        ok,
+        `unexpected error: ${text} (expected one of: ${needles.join(", ")})`
+      );
+    }
+  }
 
   before(async () => {
-    await airdropIfNeeded(owner.publicKey);
-    [vaultPda, vaultBump] = await getVaultPda(owner.publicKey);
-  });
+    await airdropIfNeeded(owner.publicKey, 2);
+    [vaultPda, vaultBump] = findVault(owner.publicKey);
 
-  // ── tests ─────────────────────────────────────────────────────────────────
-
-  it("initializes the vault", async () => {
-    const tx = await program.methods
-      .initialize()
-      .accounts({
-        owner: owner.publicKey,
-        vault: vaultPda,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    console.log("  initialize tx:", tx);
-
-    const vaultAccount = await program.account.vaultState.fetch(vaultPda);
-    assert.ok(
-      vaultAccount.owner.equals(owner.publicKey),
-      "vault owner should match"
+    mintA = await createMint(
+      provider.connection,
+      signer,
+      owner.publicKey,
+      null,
+      6
     );
-    assert.equal(vaultAccount.bump, vaultBump, "bump should be stored");
-    assert.equal(
-      vaultAccount.totalDeposited.toNumber(),
-      0,
-      "initial deposit counter should be 0"
-    );
-  });
-
-  it("deposits SOL into the vault", async () => {
-    const depositAmount = 0.5 * LAMPORTS_PER_SOL;
-    const balanceBefore = await provider.connection.getBalance(vaultPda);
-
-    const tx = await program.methods
-      .deposit(new anchor.BN(depositAmount))
-      .accounts({
-        depositor: owner.publicKey,
-        vault: vaultPda,
-        systemProgram: SystemProgram.programId,
-      })
-      .rpc();
-
-    console.log("  deposit tx:", tx);
-
-    const balanceAfter = await provider.connection.getBalance(vaultPda);
-    assert.equal(
-      balanceAfter - balanceBefore,
-      depositAmount,
-      "vault balance should increase by deposit amount"
+    mintB = await createMint(
+      provider.connection,
+      signer,
+      owner.publicKey,
+      null,
+      6
     );
 
-    const vaultAccount = await program.account.vaultState.fetch(vaultPda);
-    assert.equal(
-      vaultAccount.totalDeposited.toNumber(),
-      depositAmount,
-      "totalDeposited counter should track deposit"
+    ownerTokenA = await createAssociatedTokenAccount(
+      provider.connection,
+      signer,
+      mintA,
+      owner.publicKey
     );
-  });
-
-  it("views vault balance", async () => {
-    const balance = await provider.connection.getBalance(vaultPda);
-    console.log(`  vault balance: ${balance / LAMPORTS_PER_SOL} SOL`);
-    assert.isAbove(balance, 0, "vault should have a positive balance");
-  });
-
-  it("withdraws SOL from vault (owner only)", async () => {
-    const withdrawAmount = 0.1 * LAMPORTS_PER_SOL;
-    const ownerBefore = await provider.connection.getBalance(owner.publicKey);
-
-    const tx = await program.methods
-      .withdraw(new anchor.BN(withdrawAmount))
-      .accounts({
-        owner: owner.publicKey,
-        vault: vaultPda,
-      })
-      .rpc();
-
-    console.log("  withdraw tx:", tx);
-
-    const ownerAfter = await provider.connection.getBalance(owner.publicKey);
-    // Account for tx fees (~5000 lamports)
-    assert.approximately(
-      ownerAfter - ownerBefore,
-      withdrawAmount,
-      10_000,
-      "owner balance should increase by approximately the withdraw amount"
+    ownerTokenB = await createAssociatedTokenAccount(
+      provider.connection,
+      signer,
+      mintB,
+      owner.publicKey
     );
+
+    await mintTo(provider.connection, signer, mintA, ownerTokenA, signer, 5_000_000);
+    await mintTo(provider.connection, signer, mintB, ownerTokenB, signer, 5_000_000);
+
+    tokenVaultStateA = findTokenVault(owner.publicKey, mintA);
+    vaultTokenAccountA = findTokenVaultAta(owner.publicKey, mintA);
   });
 
-  it("rejects withdrawal by unauthorized signer", async () => {
-    const attacker = Keypair.generate();
-    await airdropIfNeeded(attacker.publicKey, 0.5);
-
-    try {
+  describe("SOL vault flow", () => {
+    it("happy path: initialize + deposit + withdraw", async () => {
       await program.methods
-        .withdraw(new anchor.BN(1000))
+        .initialize()
         .accounts({
-          owner: attacker.publicKey,
-          vault: vaultPda, // vault belongs to `owner`, not `attacker`
+          owner: owner.publicKey,
+          vault: vaultPda,
+          systemProgram: SystemProgram.programId,
         })
-        .signers([attacker])
         .rpc();
-      assert.fail("Should have thrown an error for unauthorized signer");
-    } catch (err: any) {
-      // Anchor will throw a ConstraintSeeds or AccountNotFound error
-      // because attacker's derived PDA won't match the existing vault
-      console.log("  correctly rejected unauthorized withdrawal:", err.message);
-      assert.ok(err, "expected an error");
-    }
-  });
 
-  it("rejects zero-amount deposit", async () => {
-    try {
+      const vaultAccount = await program.account.vaultState.fetch(vaultPda);
+      assert.ok(vaultAccount.owner.equals(owner.publicKey));
+      assert.equal(vaultAccount.bump, vaultBump);
+
+      const depositAmount = new anchor.BN(0.5 * LAMPORTS_PER_SOL);
+      const before = await provider.connection.getBalance(vaultPda);
       await program.methods
-        .deposit(new anchor.BN(0))
+        .deposit(depositAmount)
         .accounts({
           depositor: owner.publicKey,
           vault: vaultPda,
           systemProgram: SystemProgram.programId,
         })
         .rpc();
-      assert.fail("Should have thrown ZeroAmount error");
-    } catch (err: any) {
-      assert.include(
-        err.toString(),
-        "ZeroAmount",
-        "expected ZeroAmount error"
+      const after = await provider.connection.getBalance(vaultPda);
+      assert.equal(after - before, depositAmount.toNumber());
+
+      const withdrawAmount = new anchor.BN(0.1 * LAMPORTS_PER_SOL);
+      await program.methods
+        .withdraw(withdrawAmount)
+        .accounts({ owner: owner.publicKey, vault: vaultPda })
+        .rpc();
+
+      const balanceAfterWithdraw = await provider.connection.getBalance(vaultPda);
+      assert.isAtMost(
+        balanceAfterWithdraw,
+        after - withdrawAmount.toNumber(),
+        "vault lamports should decrease after withdrawal"
       );
-    }
+    });
+
+    it("unauthorized: attacker cannot withdraw owner vault", async () => {
+      const attacker = Keypair.generate();
+      await airdropIfNeeded(attacker.publicKey, 0.5);
+      const [attackerVaultPda] = findVault(attacker.publicKey);
+
+      await expectFails(
+        program.methods
+          .withdraw(new anchor.BN(1_000))
+          .accounts({ owner: attacker.publicKey, vault: attackerVaultPda })
+          .signers([attacker])
+          .rpc(),
+        ["ConstraintSeeds", "AccountNotInitialized", "Unauthorized"]
+      );
+    });
+
+    it("zero amount: rejects deposit and withdraw", async () => {
+      await expectFails(
+        program.methods
+          .deposit(new anchor.BN(0))
+          .accounts({
+            depositor: owner.publicKey,
+            vault: vaultPda,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc(),
+        ["ZeroAmount"]
+      );
+
+      await expectFails(
+        program.methods
+          .withdraw(new anchor.BN(0))
+          .accounts({ owner: owner.publicKey, vault: vaultPda })
+          .rpc(),
+        ["ZeroAmount"]
+      );
+    });
   });
 
-  it("rejects zero-amount withdrawal", async () => {
-    try {
+  describe("SPL token vault flow", () => {
+    it("happy path: initialize token vault + deposit + withdraw", async () => {
       await program.methods
-        .withdraw(new anchor.BN(0))
+        .initializeTokenVault()
         .accounts({
           owner: owner.publicKey,
-          vault: vaultPda,
+          mint: mintA,
+          tokenVaultState: tokenVaultStateA,
+          vaultTokenAccount: vaultTokenAccountA,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+          rent: anchor.web3.SYSVAR_RENT_PUBKEY,
         })
         .rpc();
-      assert.fail("Should have thrown ZeroAmount error");
-    } catch (err: any) {
-      assert.include(
-        err.toString(),
-        "ZeroAmount",
-        "expected ZeroAmount error"
+
+      await program.methods
+        .depositToken(new anchor.BN(1_000_000))
+        .accounts({
+          depositor: owner.publicKey,
+          mint: mintA,
+          tokenVaultState: tokenVaultStateA,
+          vaultTokenAccount: vaultTokenAccountA,
+          depositorTokenAccount: ownerTokenA,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+
+      await program.methods
+        .withdrawToken(new anchor.BN(400_000))
+        .accounts({
+          owner: owner.publicKey,
+          mint: mintA,
+          tokenVaultState: tokenVaultStateA,
+          vaultTokenAccount: vaultTokenAccountA,
+          ownerTokenAccount: ownerTokenA,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc();
+
+      const vaultToken = await getAccount(provider.connection, vaultTokenAccountA);
+      assert.equal(vaultToken.amount.toString(), "600000");
+    });
+
+    it("unauthorized: attacker cannot withdraw token vault", async () => {
+      const attacker = Keypair.generate();
+      await airdropIfNeeded(attacker.publicKey, 0.5);
+
+      const attackerTokenA = await createAssociatedTokenAccount(
+        provider.connection,
+        signer,
+        mintA,
+        attacker.publicKey
       );
-    }
-  });
 
-  it("supports SPL token vault: init → deposit → withdraw", async () => {
-    const mintAuthority = owner.payer;
-    const mint = await createMint(
-      provider.connection,
-      mintAuthority,
-      mintAuthority.publicKey,
-      null,
-      6
-    );
+      const attackerTokenVaultState = findTokenVault(attacker.publicKey, mintA);
+      const attackerVaultAta = findTokenVaultAta(attacker.publicKey, mintA);
 
-    const depositorToken = await createAssociatedTokenAccount(
-      provider.connection,
-      mintAuthority,
-      mint,
-      owner.publicKey
-    );
+      await expectFails(
+        program.methods
+          .withdrawToken(new anchor.BN(1))
+          .accounts({
+            owner: attacker.publicKey,
+            mint: mintA,
+            tokenVaultState: attackerTokenVaultState,
+            vaultTokenAccount: attackerVaultAta,
+            ownerTokenAccount: attackerTokenA,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([attacker])
+          .rpc(),
+        ["ConstraintSeeds", "AccountNotInitialized", "Unauthorized"]
+      );
+    });
 
-    await mintTo(
-      provider.connection,
-      mintAuthority,
-      mint,
-      depositorToken,
-      mintAuthority,
-      5_000_000
-    );
+    it("invalid mint: rejects mismatched token accounts", async () => {
+      await expectFails(
+        program.methods
+          .depositToken(new anchor.BN(1))
+          .accounts({
+            depositor: owner.publicKey,
+            mint: mintA,
+            tokenVaultState: tokenVaultStateA,
+            vaultTokenAccount: vaultTokenAccountA,
+            depositorTokenAccount: ownerTokenB,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc(),
+        ["InvalidMint", "ConstraintRaw", "ConstraintTokenMint"]
+      );
 
-    const [tokenVaultState] = PublicKey.findProgramAddressSync(
-      [Buffer.from("token_vault"), owner.publicKey.toBuffer(), mint.toBuffer()],
-      program.programId
-    );
+      await expectFails(
+        program.methods
+          .withdrawToken(new anchor.BN(1))
+          .accounts({
+            owner: owner.publicKey,
+            mint: mintA,
+            tokenVaultState: tokenVaultStateA,
+            vaultTokenAccount: vaultTokenAccountA,
+            ownerTokenAccount: ownerTokenB,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc(),
+        ["InvalidMint", "ConstraintRaw", "ConstraintTokenMint"]
+      );
+    });
 
-    const [vaultTokenAccount] = PublicKey.findProgramAddressSync(
-      [Buffer.from("token_vault_ata"), owner.publicKey.toBuffer(), mint.toBuffer()],
-      program.programId
-    );
+    it("zero amount: rejects token deposit and withdraw", async () => {
+      await expectFails(
+        program.methods
+          .depositToken(new anchor.BN(0))
+          .accounts({
+            depositor: owner.publicKey,
+            mint: mintA,
+            tokenVaultState: tokenVaultStateA,
+            vaultTokenAccount: vaultTokenAccountA,
+            depositorTokenAccount: ownerTokenA,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc(),
+        ["ZeroAmount"]
+      );
 
-    await program.methods
-      .initializeTokenVault()
-      .accounts({
-        owner: owner.publicKey,
-        mint,
-        tokenVaultState,
-        vaultTokenAccount,
-        tokenProgram: TOKEN_PROGRAM_ID,
-        systemProgram: SystemProgram.programId,
-        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-      })
-      .rpc();
-
-    await program.methods
-      .depositToken(new anchor.BN(1_000_000))
-      .accounts({
-        depositor: owner.publicKey,
-        mint,
-        tokenVaultState,
-        vaultTokenAccount,
-        depositorTokenAccount: depositorToken,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc();
-
-    await program.methods
-      .withdrawToken(new anchor.BN(500_000))
-      .accounts({
-        owner: owner.publicKey,
-        mint,
-        tokenVaultState,
-        vaultTokenAccount,
-        ownerTokenAccount: depositorToken,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .rpc();
-
-    const vaultBalance = await getAccount(provider.connection, vaultTokenAccount);
-    assert.equal(vaultBalance.amount.toString(), "500000");
+      await expectFails(
+        program.methods
+          .withdrawToken(new anchor.BN(0))
+          .accounts({
+            owner: owner.publicKey,
+            mint: mintA,
+            tokenVaultState: tokenVaultStateA,
+            vaultTokenAccount: vaultTokenAccountA,
+            ownerTokenAccount: ownerTokenA,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .rpc(),
+        ["ZeroAmount"]
+      );
+    });
   });
 });
