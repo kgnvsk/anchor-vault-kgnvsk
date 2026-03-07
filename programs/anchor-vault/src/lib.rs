@@ -1,24 +1,25 @@
 use anchor_lang::prelude::*;
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("4UnyUVvoYXiV7c9nnWK6tYKJFQdSNG94qxSiHbv4qJKm");
 
 /// # Anchor Vault
 ///
-/// A simple, auditable SOL vault program built with the Anchor framework.
+/// A simple, auditable SOL + SPL Token vault program built with the Anchor framework.
 ///
 /// ## Features
 /// - **Initialize** – create a personal vault PDA per owner.
 /// - **Deposit** – anyone can deposit SOL into the vault.
 /// - **Withdraw** – only the authorized owner can withdraw SOL.
+/// - **Initialize Token Vault** – create a token vault for any SPL mint.
+/// - **Deposit Token** – deposit any SPL token into the vault.
+/// - **Withdraw Token** – withdraw SPL tokens (owner only).
 /// - **View balance** – read lamports directly from the PDA account.
 #[program]
 pub mod anchor_vault {
     use super::*;
 
     /// Initialize the vault. Creates a vault PDA owned by the signer.
-    ///
-    /// The vault address is deterministically derived from
-    /// `["vault", owner_pubkey]` so each wallet gets exactly one vault.
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
         let vault = &mut ctx.accounts.vault;
         vault.owner = ctx.accounts.owner.key();
@@ -29,8 +30,6 @@ pub mod anchor_vault {
     }
 
     /// Deposit `amount` lamports from the depositor into the vault.
-    ///
-    /// Anyone can deposit (useful for funding vaults on behalf of others).
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroAmount);
 
@@ -59,9 +58,6 @@ pub mod anchor_vault {
     }
 
     /// Withdraw `amount` lamports from the vault to the owner.
-    ///
-    /// Only the owner stored in the vault state may call this instruction.
-    /// The vault must retain enough lamports to remain rent-exempt.
     pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
         require!(amount > 0, VaultError::ZeroAmount);
 
@@ -72,11 +68,78 @@ pub mod anchor_vault {
 
         require!(amount <= available, VaultError::InsufficientFunds);
 
-        // Direct lamport transfer from PDA – safe because vault is owned by this program
         **ctx.accounts.vault.to_account_info().try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.owner.try_borrow_mut_lamports()? += amount;
 
         msg!("Withdrew {} lamports from vault", amount);
+        Ok(())
+    }
+
+    /// Initialize a token vault for a specific SPL mint.
+    pub fn initialize_token_vault(ctx: Context<InitializeTokenVault>) -> Result<()> {
+        let token_vault = &mut ctx.accounts.token_vault_state;
+        token_vault.owner = ctx.accounts.owner.key();
+        token_vault.mint = ctx.accounts.mint.key();
+        token_vault.bump = ctx.bumps.token_vault_state;
+        token_vault.total_deposited = 0;
+        msg!("Token vault initialized. Owner: {}, Mint: {}", token_vault.owner, token_vault.mint);
+        Ok(())
+    }
+
+    /// Deposit `amount` SPL tokens from depositor into the vault's token account.
+    pub fn deposit_token(ctx: Context<DepositToken>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::ZeroAmount);
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.depositor_token_account.to_account_info(),
+            to: ctx.accounts.vault_token_account.to_account_info(),
+            authority: ctx.accounts.depositor.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+        token::transfer(cpi_ctx, amount)?;
+
+        ctx.accounts.token_vault_state.total_deposited = ctx
+            .accounts
+            .token_vault_state
+            .total_deposited
+            .saturating_add(amount);
+
+        msg!("Deposited {} tokens into token vault", amount);
+        Ok(())
+    }
+
+    /// Withdraw `amount` SPL tokens from the vault to the owner's token account.
+    pub fn withdraw_token(ctx: Context<WithdrawToken>, amount: u64) -> Result<()> {
+        require!(amount > 0, VaultError::ZeroAmount);
+        require!(
+            ctx.accounts.vault_token_account.amount >= amount,
+            VaultError::InsufficientFunds
+        );
+
+        let owner_key = ctx.accounts.owner.key();
+        let mint_key = ctx.accounts.token_vault_state.mint;
+        let bump = ctx.accounts.token_vault_state.bump;
+        let seeds: &[&[u8]] = &[
+            b"token_vault",
+            owner_key.as_ref(),
+            mint_key.as_ref(),
+            &[bump],
+        ];
+        let signer_seeds = &[seeds];
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.vault_token_account.to_account_info(),
+            to: ctx.accounts.owner_token_account.to_account_info(),
+            authority: ctx.accounts.token_vault_state.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            cpi_accounts,
+            signer_seeds,
+        );
+        token::transfer(cpi_ctx, amount)?;
+
+        msg!("Withdrew {} tokens from token vault", amount);
         Ok(())
     }
 }
@@ -85,11 +148,9 @@ pub mod anchor_vault {
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    /// The wallet that will own (and fund) the vault.
     #[account(mut)]
     pub owner: Signer<'info>,
 
-    /// Vault PDA: seeds = ["vault", owner].
     #[account(
         init,
         payer = owner,
@@ -104,11 +165,9 @@ pub struct Initialize<'info> {
 
 #[derive(Accounts)]
 pub struct Deposit<'info> {
-    /// Anyone can be the depositor.
     #[account(mut)]
     pub depositor: Signer<'info>,
 
-    /// The vault to fund.
     #[account(
         mut,
         seeds = [b"vault", vault.owner.as_ref()],
@@ -121,7 +180,6 @@ pub struct Deposit<'info> {
 
 #[derive(Accounts)]
 pub struct Withdraw<'info> {
-    /// Must match `vault.owner`.
     #[account(mut)]
     pub owner: Signer<'info>,
 
@@ -134,24 +192,130 @@ pub struct Withdraw<'info> {
     pub vault: Account<'info, VaultState>,
 }
 
+#[derive(Accounts)]
+pub struct InitializeTokenVault<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        init,
+        payer = owner,
+        space = 8 + TokenVaultState::LEN,
+        seeds = [b"token_vault", owner.key().as_ref(), mint.key().as_ref()],
+        bump
+    )]
+    pub token_vault_state: Account<'info, TokenVaultState>,
+
+    /// The vault's associated token account (PDA-owned)
+    #[account(
+        init,
+        payer = owner,
+        token::mint = mint,
+        token::authority = token_vault_state,
+        seeds = [b"token_vault_ata", owner.key().as_ref(), mint.key().as_ref()],
+        bump
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct DepositToken<'info> {
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"token_vault", token_vault_state.owner.as_ref(), mint.key().as_ref()],
+        bump = token_vault_state.bump,
+        constraint = token_vault_state.mint == mint.key() @ VaultError::InvalidMint
+    )]
+    pub token_vault_state: Account<'info, TokenVaultState>,
+
+    #[account(
+        mut,
+        seeds = [b"token_vault_ata", token_vault_state.owner.as_ref(), mint.key().as_ref()],
+        bump
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = depositor_token_account.mint == mint.key() @ VaultError::InvalidMint
+    )]
+    pub depositor_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawToken<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        seeds = [b"token_vault", owner.key().as_ref(), mint.key().as_ref()],
+        bump = token_vault_state.bump,
+        has_one = owner @ VaultError::Unauthorized,
+        constraint = token_vault_state.mint == mint.key() @ VaultError::InvalidMint
+    )]
+    pub token_vault_state: Account<'info, TokenVaultState>,
+
+    #[account(
+        mut,
+        seeds = [b"token_vault_ata", owner.key().as_ref(), mint.key().as_ref()],
+        bump
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = owner_token_account.mint == mint.key() @ VaultError::InvalidMint,
+        constraint = owner_token_account.owner == owner.key() @ VaultError::Unauthorized
+    )]
+    pub owner_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
-/// On-chain vault metadata stored in the PDA account.
 #[account]
 pub struct VaultState {
-    /// The authorized owner who can withdraw funds.
     pub owner: Pubkey,
-    /// PDA bump seed cached to save compute.
     pub bump: u8,
-    /// Cumulative lamports deposited (informational).
     pub total_deposited: u64,
 }
 
 impl VaultState {
-    /// Byte size of the account data (excluding the 8-byte discriminator).
-    pub const LEN: usize = 32  // owner: Pubkey
-        + 1   // bump: u8
-        + 8;  // total_deposited: u64
+    pub const LEN: usize = 32 + 1 + 8;
+}
+
+/// On-chain token vault metadata.
+#[account]
+pub struct TokenVaultState {
+    /// The authorized owner who can withdraw tokens.
+    pub owner: Pubkey,
+    /// The SPL token mint this vault accepts.
+    pub mint: Pubkey,
+    /// PDA bump seed.
+    pub bump: u8,
+    /// Cumulative tokens deposited (informational).
+    pub total_deposited: u64,
+}
+
+impl TokenVaultState {
+    pub const LEN: usize = 32 + 32 + 1 + 8;
 }
 
 // ─── Custom Errors ───────────────────────────────────────────────────────────
@@ -164,4 +328,6 @@ pub enum VaultError {
     ZeroAmount,
     #[msg("Insufficient funds available in vault")]
     InsufficientFunds,
+    #[msg("Token mint does not match vault mint")]
+    InvalidMint,
 }

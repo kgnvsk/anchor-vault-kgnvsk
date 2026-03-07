@@ -10,10 +10,13 @@ A clean, well-documented SOL vault program built with the [Anchor](https://www.a
 
 | Instruction | Description |
 |-------------|-------------|
-| `initialize` | Creates a vault PDA for the caller. One vault per wallet. |
+| `initialize` | Creates a SOL vault PDA for the caller. One vault per wallet. |
 | `deposit` | Deposits SOL into the vault. Anyone can fund a vault. |
 | `withdraw` | Withdraws SOL from the vault. **Owner only.** |
-| Balance query | Read vault lamports directly from the PDA account. |
+| `initialize_token_vault` | Creates a token vault PDA for any SPL mint. |
+| `deposit_token` | Deposits any SPL token into the token vault. |
+| `withdraw_token` | Withdraws SPL tokens from the token vault. **Owner only.** |
+| Balance query | Read vault lamports or token amounts directly from the PDA accounts. |
 
 ---
 
