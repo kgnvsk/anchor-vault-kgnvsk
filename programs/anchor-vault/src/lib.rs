@@ -21,6 +21,7 @@ pub mod anchor_vault {
 
     /// Initialize the vault. Creates a vault PDA owned by the signer.
     pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let vault_key = ctx.accounts.vault.key();
         let vault = &mut ctx.accounts.vault;
         vault.owner = ctx.accounts.owner.key();
         vault.bump = ctx.bumps.vault;
@@ -28,7 +29,7 @@ pub mod anchor_vault {
 
         emit!(VaultInitialized {
             owner: vault.owner,
-            vault: ctx.accounts.vault.key(),
+            vault: vault_key,
             bump: vault.bump,
         });
 
@@ -98,6 +99,8 @@ pub mod anchor_vault {
 
     /// Initialize a token vault for a specific SPL mint.
     pub fn initialize_token_vault(ctx: Context<InitializeTokenVault>) -> Result<()> {
+        let token_vault_state_key = ctx.accounts.token_vault_state.key();
+        let vault_token_account_key = ctx.accounts.vault_token_account.key();
         let token_vault = &mut ctx.accounts.token_vault_state;
         token_vault.owner = ctx.accounts.owner.key();
         token_vault.mint = ctx.accounts.mint.key();
@@ -107,8 +110,8 @@ pub mod anchor_vault {
         emit!(TokenVaultInitialized {
             owner: token_vault.owner,
             mint: token_vault.mint,
-            token_vault_state: ctx.accounts.token_vault_state.key(),
-            vault_token_account: ctx.accounts.vault_token_account.key(),
+            token_vault_state: token_vault_state_key,
+            vault_token_account: vault_token_account_key,
             bump: token_vault.bump,
         });
 
