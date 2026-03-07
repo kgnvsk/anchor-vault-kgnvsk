@@ -25,6 +25,13 @@ import {
   PublicKey,
   SystemProgram,
 } from "@solana/web3.js";
+import {
+  createMint,
+  createAssociatedTokenAccount,
+  mintTo,
+  getAccount,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 import { assert } from "chai";
 
 describe("anchor-vault", () => {
@@ -210,5 +217,82 @@ describe("anchor-vault", () => {
         "expected ZeroAmount error"
       );
     }
+  });
+
+  it("supports SPL token vault: init → deposit → withdraw", async () => {
+    const mintAuthority = owner.payer;
+    const mint = await createMint(
+      provider.connection,
+      mintAuthority,
+      mintAuthority.publicKey,
+      null,
+      6
+    );
+
+    const depositorToken = await createAssociatedTokenAccount(
+      provider.connection,
+      mintAuthority,
+      mint,
+      owner.publicKey
+    );
+
+    await mintTo(
+      provider.connection,
+      mintAuthority,
+      mint,
+      depositorToken,
+      mintAuthority,
+      5_000_000
+    );
+
+    const [tokenVaultState] = PublicKey.findProgramAddressSync(
+      [Buffer.from("token_vault"), owner.publicKey.toBuffer(), mint.toBuffer()],
+      program.programId
+    );
+
+    const [vaultTokenAccount] = PublicKey.findProgramAddressSync(
+      [Buffer.from("token_vault_ata"), owner.publicKey.toBuffer(), mint.toBuffer()],
+      program.programId
+    );
+
+    await program.methods
+      .initializeTokenVault()
+      .accounts({
+        owner: owner.publicKey,
+        mint,
+        tokenVaultState,
+        vaultTokenAccount,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        rent: anchor.web3.SYSVAR_RENT_PUBKEY,
+      })
+      .rpc();
+
+    await program.methods
+      .depositToken(new anchor.BN(1_000_000))
+      .accounts({
+        depositor: owner.publicKey,
+        mint,
+        tokenVaultState,
+        vaultTokenAccount,
+        depositorTokenAccount: depositorToken,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .rpc();
+
+    await program.methods
+      .withdrawToken(new anchor.BN(500_000))
+      .accounts({
+        owner: owner.publicKey,
+        mint,
+        tokenVaultState,
+        vaultTokenAccount,
+        ownerTokenAccount: depositorToken,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .rpc();
+
+    const vaultBalance = await getAccount(provider.connection, vaultTokenAccount);
+    assert.equal(vaultBalance.amount.toString(), "500000");
   });
 });
